@@ -185,6 +185,12 @@ Usage of flatjsonl:
         RAW file column delimiter.
   -replace-keys
         Use unique tail segment converted to snake_case as key.
+  -resolve-conflict-report string
+        Write resolve conflicts (same identity and revision, different content) to this JSONL file.
+  -resolve-identity string
+        Resolve versioned records by identity, comma-separated keys (e.g. ".id,.tenant"), needs -resolve-revision.
+  -resolve-revision string
+        Revision key (e.g. ".rev") for versioned record resolution, highest revision wins regardless of input order.
   -show-json-schema
         Show hierarchy as JSON schema.
   -show-keys-flat
@@ -251,6 +257,13 @@ keepJSON:
 # Use keepJSONRegex to list key patterns with arrays and objects of highly cardinal data.
 keepJSONRegex:
   - ".data.*.values"
+# Resolve versioned records: for rows with the same identityKeys values only
+# the row with the highest revisionKey value is written to the outputs.
+resolve:
+  identityKeys:
+    - ".id"
+  revisionKey: ".rev"
+  conflictReport: conflicts.jsonl
 ```
 
 Parse time is a map of original key to time pattern. See https://pkg.go.dev/time#pkg-constants for pattern rules.
@@ -289,6 +302,42 @@ recommended to use mutually exclusive expressions and match against full key by 
 
 If multiple keys are replaced into similar key, coalesce function is used for resulting column value, or if 
 `concatDelimiter` is defined those values would be concatenated.
+
+### Resolving versioned records
+
+When inputs mix older and newer snapshots of the same logical records (e.g. `old.jsonl` and `new.jsonl`
+passed together), reading order would normally decide which version ends up in the output. With `resolve`
+configuration (or `-resolve-identity`/`-resolve-revision` flags) the final value is selected by explicit
+identity and revision instead, so the result does not depend on the order inputs are read:
+
+```
+flatjsonl -sqlite report.sqlite -parquet report.parquet \
+  -resolve-identity .id -resolve-revision .rev \
+  -resolve-conflict-report conflicts.jsonl \
+  old.jsonl new.jsonl
+```
+
+Resolution semantics:
+
+* Rows that share the same `identityKeys` values are versions of the same logical record.
+* Only the version with the highest `revisionKey` value (numeric) is written to the outputs,
+  all outputs (SQLite, Parquet, CSV, ...) receive the same final record set.
+* Identical versions (same identity, revision and content) are deduplicated.
+* Same identity and revision but different content is a conflict: the row with the lexicographically
+  lowest content hash is kept (deterministic, read-order independent) and every conflict is reported
+  with `input:line` locations of both sides and the list of differing keys, either to
+  `conflictReport` file as JSON lines or to STDERR.
+* Rows with missing identity or revision can not be resolved and are passed through to the output
+  as is (logged and counted in the summary).
+* Resolved rows are emitted sorted by identity with dense sequence numbers.
+
+Example conflict report line:
+
+```json
+{"identity":{".id":"3"},"revision":5,"kept":{"location":"new.jsonl:2","contentHash":"4828760a3d20a224"},"dropped":{"location":"old.jsonl:3","contentHash":"9113e81ded78cdfd"},"differingKeys":[".name"]}
+```
+
+Please note that resolution buffers distinct record versions in memory before emitting the final rows.
 
 ### Transposing data
 

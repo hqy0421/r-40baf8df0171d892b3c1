@@ -60,6 +60,10 @@ type Flags struct {
 	MatchLinePrefix   string
 	CaseSensitiveKeys bool
 
+	ResolveIdentity       string
+	ResolveRevision       string
+	ResolveConflictReport string
+
 	ShowKeysFlat   bool
 	ShowKeysHier   bool
 	ShowKeysInfo   bool
@@ -109,6 +113,12 @@ func (f *Flags) Register() {
 	flag.BoolVar(&f.SkipZeroCols, "skip-zero-cols", false, "Skip columns with zero values.")
 	flag.BoolVar(&f.AddSequence, "add-sequence", false, "Add auto incremented sequence number.")
 	flag.BoolVar(&f.CaseSensitiveKeys, "case-sensitive-keys", false, "Use case-sensitive keys (can fail for SQLite).")
+	flag.StringVar(&f.ResolveIdentity, "resolve-identity", "",
+		"Resolve versioned records by identity, comma-separated keys (e.g. \".id,.tenant\"), needs -resolve-revision.")
+	flag.StringVar(&f.ResolveRevision, "resolve-revision", "",
+		"Revision key (e.g. \".rev\") for versioned record resolution, highest revision wins regardless of input order.")
+	flag.StringVar(&f.ResolveConflictReport, "resolve-conflict-report", "",
+		"Write resolve conflicts (same identity and revision, different content) to this JSONL file.")
 	flag.StringVar(&f.MatchLinePrefix, "match-line-prefix", "", "Regular expression to capture parts of line prefix (preceding JSON).")
 	flag.IntVar(&f.MaxLines, "max-lines", 0, "Max number of lines to process.")
 	flag.IntVar(&f.OffsetLines, "offset-lines", 0, "Skip a number of first lines.")

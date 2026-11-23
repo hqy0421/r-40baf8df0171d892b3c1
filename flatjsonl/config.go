@@ -18,4 +18,5 @@ type Config struct {
 	KeepJSON           []string           `json:"keepJSON" yaml:"keepJSON" description:"List of keys to keep as JSON literals."`
 	KeepJSONRegex      []string           `json:"keepJSONRegex" yaml:"keepJSONRegex" description:"List of key patterns to keep as JSON literals."`
 	AllowCardinality   []string           `json:"allowCardinality" yaml:"allowCardinality" description:"List of keys to allow high cardinality of child keys."`
+	Resolve            *ResolveConfig     `json:"resolve" yaml:"resolve" description:"Versioned record resolution by identity and revision, only the highest revision of each logical record is written to the outputs."`
 }

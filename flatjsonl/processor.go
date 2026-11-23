@@ -36,6 +36,8 @@ type Processor struct {
 	w  *Writer
 	rd *Reader
 
+	resolver *recordResolver
+
 	includeKeys  map[string]int
 	includeRegex []*regexp.Regexp
 	excludeRegex []*regexp.Regexp
@@ -117,6 +119,32 @@ func NewProcessor(f Flags, cfg Config, inputs ...Input) (*Processor, error) { //
 
 	if f.GetKey != "" {
 		cfg.IncludeKeys = append(cfg.IncludeKeys, f.GetKey)
+	}
+
+	if f.ResolveIdentity != "" || f.ResolveRevision != "" || f.ResolveConflictReport != "" {
+		var ids []string
+
+		for _, k := range strings.Split(f.ResolveIdentity, ",") {
+			if k = strings.TrimSpace(k); k != "" {
+				ids = append(ids, k)
+			}
+		}
+
+		cfg.Resolve = &ResolveConfig{
+			IdentityKeys:   ids,
+			RevisionKey:    f.ResolveRevision,
+			ConflictReport: f.ResolveConflictReport,
+		}
+	}
+
+	if cfg.Resolve != nil {
+		if err := cfg.Resolve.validate(); err != nil {
+			return nil, err
+		}
+
+		if len(cfg.IncludeKeys) > 0 {
+			cfg.IncludeKeys = ensureIncludedKeys(cfg.IncludeKeys, cfg.Resolve.requiredKeys())
+		}
 	}
 
 	p := &Processor{
@@ -588,7 +616,22 @@ func (p *Processor) iterateForWriters() error {
 		return err
 	}
 
-	for _, input := range p.inputs {
+	if p.cfg.Resolve != nil {
+		res, err := newRecordResolver(p)
+		if err != nil {
+			return err
+		}
+
+		p.resolver = res
+		wi.sink = res.receiveRow
+
+		p.pr.AddMetrics(progress.Metric{
+			Name: "buffered records", Type: progress.Gauge,
+			Value: func() int64 { return int64(len(res.records)) },
+		})
+	}
+
+	for i, input := range p.inputs {
 		task := "flattening data"
 		if len(p.inputs) > 1 && input.FileName != "" {
 			task = "flattening data (" + input.FileName + ")"
@@ -607,6 +650,17 @@ func (p *Processor) iterateForWriters() error {
 		sess.setupWalker = wi.setupWalker
 		sess.lineFinished = wi.lineFinished
 
+		seqBefore := atomic.LoadInt64(&p.rd.Sequence)
+
+		if p.resolver != nil {
+			name := input.FileName
+			if name == "" {
+				name = "reader#" + strconv.Itoa(i)
+			}
+
+			p.resolver.beginInput(name, seqBefore+1, p.rd.OffsetLines)
+		}
+
 		err = p.rd.Read(sess)
 		if err != nil {
 			sess.Close()
@@ -615,9 +669,23 @@ func (p *Processor) iterateForWriters() error {
 		}
 
 		sess.Close()
+
+		if p.resolver != nil {
+			p.resolver.endInput(atomic.LoadInt64(&p.rd.Sequence))
+		}
 	}
 
-	return wi.waitPending()
+	if err := wi.waitPending(); err != nil {
+		return err
+	}
+
+	if p.resolver != nil {
+		if err := p.resolver.flush(); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 type lineBuf struct {
@@ -646,6 +714,7 @@ func newWriteIterator(p *Processor, pkIndex map[uint64]int, pkDst map[uint64]str
 		},
 	}
 	wi.seqExpected = 1
+	wi.sink = p.w.ReceiveRow
 	wi.pkIndex = pkIndex
 	wi.pkDst = pkDst
 	wi.pkTimeFmt = pkTimeFmt
@@ -727,6 +796,10 @@ type writeIterator struct {
 	lineBufPool sync.Pool
 	seqExpected int64
 	pending     *xsync.Map[int64, *lineBuf]
+
+	// sink receives completed rows, defaults to Writer.ReceiveRow, can be
+	// overridden e.g. by versioned record resolution.
+	sink func(seq int64, values []Value) error
 
 	// Finished was originally *xsync.Map[int64, *lineBuf], but for unclear, hardly reproducible reason
 	// it was leading to eventually failing "waiting pending".
@@ -910,7 +983,7 @@ func (wi *writeIterator) complete(seq int64, l *lineBuf) error {
 		l.values[i] = val
 	}
 
-	err := wi.p.w.ReceiveRow(seq, l.values)
+	err := wi.sink(seq, l.values)
 
 	atomic.AddInt64(&wi.seqExpected, 1)
 
